@@ -8,6 +8,8 @@ interface HeaderProps {
   logsCount: number;
   onDownloadAll: () => void;
   hasFiles: boolean;
+  onLogout?: () => void;
+  onGoToHome?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -17,23 +19,31 @@ export const Header: React.FC<HeaderProps> = ({
   logsCount,
   onDownloadAll,
   hasFiles,
+  onLogout,
+  onGoToHome,
 }) => {
   return (
     <header className="border-b border-slate-800 bg-slate-900/90 backdrop-blur sticky top-0 z-40">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-8">
         {/* Zone 1: Single text wordmark */}
         <div className="flex items-center gap-3 shrink-0">
-          <div className="w-9 h-9 rounded-lg bg-sky-500/10 border border-sky-500/30 flex items-center justify-center text-sky-400">
-            <HardDrive className="w-5 h-5" />
-          </div>
-          <div className="flex flex-col">
-            <span className="text-base font-bold tracking-tight text-white whitespace-nowrap">
-              DropVault
-            </span>
-            <span className="text-[10px] text-slate-400 font-mono tracking-wider uppercase">
-              PC Ingestion Hub
-            </span>
-          </div>
+          <button 
+            onClick={onGoToHome}
+            className="flex items-center gap-3 text-left focus:outline-none"
+            title="Go to Public DropVault"
+          >
+            <div className="w-9 h-9 rounded-lg bg-sky-500/10 border border-sky-500/30 flex items-center justify-center text-sky-400">
+              <HardDrive className="w-5 h-5" />
+            </div>
+            <div className="flex flex-col">
+              <span className="text-base font-bold tracking-tight text-white whitespace-nowrap">
+                DropVault
+              </span>
+              <span className="text-[10px] text-slate-400 font-mono tracking-wider uppercase">
+                Admin Panel
+              </span>
+            </div>
+          </button>
         </div>
 
         {/* Zone 2: Navigation Links (Single-line controls) */}
@@ -93,7 +103,7 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
         </nav>
 
-        {/* Zone 3: 1 Primary CTA */}
+        {/* Zone 3: 1 Primary CTA + Logout */}
         <div className="flex items-center gap-2 shrink-0">
           <button
             onClick={onDownloadAll}
@@ -104,6 +114,16 @@ export const Header: React.FC<HeaderProps> = ({
             <Download className="w-3.5 h-3.5" />
             <span>Download All ZIP</span>
           </button>
+
+          {onLogout && (
+            <button
+              onClick={onLogout}
+              title="Lock Admin Session"
+              className="px-2.5 py-1.5 text-xs font-medium text-slate-400 hover:text-slate-200 bg-slate-800/80 hover:bg-slate-800 border border-slate-700 rounded-md transition-colors whitespace-nowrap"
+            >
+              Lock
+            </button>
+          )}
         </div>
       </div>
     </header>

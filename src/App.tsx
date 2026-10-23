@@ -7,9 +7,30 @@ import { AuditLogs } from './components/AuditLogs';
 import { ScriptGuides } from './components/ScriptGuides';
 import { DirectUploader } from './components/DirectUploader';
 import { FilePreviewModal } from './components/FilePreviewModal';
-import { AlertCircle, RefreshCw, Sparkles, CheckCircle2 } from 'lucide-react';
+import { PublicHome } from './components/PublicHome';
+import { AdminLogin } from './components/AdminLogin';
+import { AlertCircle, RefreshCw, CheckCircle2 } from 'lucide-react';
+
+const ADMIN_PASSCODE = 'cookie';
+const DOMAIN_URL = 'https://cook-3.vercel.app';
 
 export default function App() {
+  // Navigation: check if user accessed /admin directly or via url
+  const [isAdminRoute, setIsAdminRoute] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return window.location.pathname.startsWith('/admin');
+    }
+    return false;
+  });
+
+  // Admin authentication state saved in session
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return sessionStorage.getItem('dropvault_admin_auth') === ADMIN_PASSCODE;
+    }
+    return false;
+  });
+
   const [activeTab, setActiveTab] = useState<'vault' | 'logs' | 'scripts' | 'uploader'>('vault');
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [logs, setLogs] = useState<UploadAuditLog[]>([]);
@@ -20,7 +41,38 @@ export default function App() {
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
   const [autoSyncNotice, setAutoSyncNotice] = useState<string | null>(null);
 
-  const currentHost = typeof window !== 'undefined' ? window.location.origin : '';
+  const currentHost = typeof window !== 'undefined' ? window.location.origin : DOMAIN_URL;
+
+  // Listen to browser navigation back/forward
+  useEffect(() => {
+    const handlePopState = () => {
+      setIsAdminRoute(window.location.pathname.startsWith('/admin'));
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  // Path navigation helper
+  const navigateTo = (path: string) => {
+    window.history.pushState(null, '', path);
+    setIsAdminRoute(path.startsWith('/admin'));
+  };
+
+  // Login handler
+  const handleLogin = (passcode: string): boolean => {
+    if (passcode.trim() === ADMIN_PASSCODE) {
+      sessionStorage.setItem('dropvault_admin_auth', ADMIN_PASSCODE);
+      setIsAuthenticated(true);
+      return true;
+    }
+    return false;
+  };
+
+  // Logout handler
+  const handleLogout = () => {
+    sessionStorage.removeItem('dropvault_admin_auth');
+    setIsAuthenticated(false);
+  };
 
   // Fetch all state from server
   const fetchData = useCallback(async (isSilent = false) => {
@@ -35,7 +87,7 @@ export default function App() {
       ]);
 
       if (!filesRes.ok || !logsRes.ok) {
-        throw new Error('Failed to communicate with DropVault server');
+        throw new Error('Failed to communicate with server');
       }
 
       const filesData = await filesRes.json();
@@ -65,7 +117,7 @@ export default function App() {
     }
   }, []);
 
-  // Initial load + periodic 5-second polling for PC sync
+  // Poll for new files when in admin view
   useEffect(() => {
     fetchData();
 
@@ -77,7 +129,7 @@ export default function App() {
   }, [fetchData]);
 
   // Handle single file deletion
-  const handleDeleteFile = async (id: string, name: string) => {
+  const handleDeleteFile = async (id: string) => {
     try {
       const res = await fetch(`/api/files/${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to delete file');
@@ -104,6 +156,29 @@ export default function App() {
     window.location.href = '/api/files/download-all';
   };
 
+  // 1. PUBLIC VIEW (Root /)
+  if (!isAdminRoute) {
+    return (
+      <PublicHome
+        onNavigateToAdmin={() => navigateTo('/admin')}
+        domainUrl={DOMAIN_URL}
+      />
+    );
+  }
+
+  // 2. ADMIN LOGIN GATE (Protected with passcode 'cookie')
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-center">
+        <AdminLogin
+          onLogin={handleLogin}
+          onBackToHome={() => navigateTo('/')}
+        />
+      </div>
+    );
+  }
+
+  // 3. ADMIN PANEL (Authenticated)
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col selection:bg-sky-500/30 selection:text-sky-200">
       {/* Top Header */}
@@ -114,6 +189,8 @@ export default function App() {
         logsCount={logs.length}
         onDownloadAll={handleDownloadAll}
         hasFiles={files.length > 0}
+        onLogout={handleLogout}
+        onGoToHome={() => navigateTo('/')}
       />
 
       {/* Main Content Container */}
@@ -155,14 +232,14 @@ export default function App() {
           files={files}
           logs={logs}
           stats={stats}
-          currentHost={currentHost}
+          currentHost={DOMAIN_URL}
         />
 
         {/* Active View Switcher */}
         {loading && files.length === 0 ? (
           <div className="py-24 text-center space-y-3">
             <RefreshCw className="w-6 h-6 text-sky-400 animate-spin mx-auto" />
-            <p className="text-xs text-slate-400 font-mono">Connecting to DropVault Ingestion Service...</p>
+            <p className="text-xs text-slate-400 font-mono">Loading DropVault data...</p>
           </div>
         ) : (
           <>
@@ -186,7 +263,7 @@ export default function App() {
 
             {activeTab === 'scripts' && (
               <ScriptGuides
-                serverUrl={currentHost}
+                serverUrl={DOMAIN_URL}
                 onTestUploadSuccess={() => {
                   fetchData(true);
                   setActiveTab('vault');
@@ -210,11 +287,16 @@ export default function App() {
       <footer className="border-t border-slate-900 bg-slate-950 py-4 mt-auto">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
           <div className="flex items-center gap-2 font-mono text-[11px]">
-            <span>DropVault Ingestion Server</span>
+            <span>DropVault Admin Vault</span>
             <span>·</span>
-            <span>Unauthenticated Multipart Protocol</span>
+            <span>Domain: {DOMAIN_URL}</span>
             <span>·</span>
-            <span>Auto Sync Active</span>
+            <button
+              onClick={() => navigateTo('/')}
+              className="text-sky-400 hover:text-sky-300 underline"
+            >
+              Public Upload View
+            </button>
           </div>
           <div className="flex items-center gap-3 font-mono text-[11px]">
             <span>Last checked: {lastRefreshed.toLocaleTimeString()}</span>
