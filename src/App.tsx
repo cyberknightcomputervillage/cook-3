@@ -9,19 +9,35 @@ import { DirectUploader } from './components/DirectUploader';
 import { FilePreviewModal } from './components/FilePreviewModal';
 import { PublicHome } from './components/PublicHome';
 import { AdminLogin } from './components/AdminLogin';
+import { 
+  subscribeToFiles, 
+  subscribeToLogs, 
+  deleteFileFromFirebase, 
+  clearFirebaseLogs 
+} from './lib/firebaseStore';
 import { AlertCircle, RefreshCw, CheckCircle2 } from 'lucide-react';
 
 const ADMIN_PASSCODE = 'cookie';
 const DOMAIN_URL = 'https://cook-3.vercel.app';
 
 export default function App() {
-  // Navigation: check if user accessed /admin directly or via url
-  const [isAdminRoute, setIsAdminRoute] = useState<boolean>(() => {
-    if (typeof window !== 'undefined') {
-      return window.location.pathname.startsWith('/admin');
-    }
-    return false;
-  });
+  // Helper to determine if current URL targets admin
+  const checkIsAdmin = (): boolean => {
+    if (typeof window === 'undefined') return false;
+    const path = window.location.pathname.toLowerCase();
+    const hash = window.location.hash.toLowerCase();
+    const search = window.location.search.toLowerCase();
+    return (
+      path === '/admin' || 
+      path.startsWith('/admin/') || 
+      hash === '#/admin' || 
+      hash.startsWith('#/admin') || 
+      search.includes('admin=true')
+    );
+  };
+
+  // Navigation: check if user accessed /admin directly or via hash or search
+  const [isAdminRoute, setIsAdminRoute] = useState<boolean>(checkIsAdmin);
 
   // Admin authentication state saved in session
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
@@ -41,21 +57,34 @@ export default function App() {
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
   const [autoSyncNotice, setAutoSyncNotice] = useState<string | null>(null);
 
-  const currentHost = typeof window !== 'undefined' ? window.location.origin : DOMAIN_URL;
+  const currentHost = typeof window !== 'undefined' && window.location.origin.includes('localhost') || window.location.origin.includes('run.app')
+    ? window.location.origin
+    : DOMAIN_URL;
 
-  // Listen to browser navigation back/forward
+  // Listen to browser navigation (back/forward and hash changes)
   useEffect(() => {
-    const handlePopState = () => {
-      setIsAdminRoute(window.location.pathname.startsWith('/admin'));
+    const handleUrlChange = () => {
+      setIsAdminRoute(checkIsAdmin());
     };
-    window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
+    window.addEventListener('popstate', handleUrlChange);
+    window.addEventListener('hashchange', handleUrlChange);
+    return () => {
+      window.removeEventListener('popstate', handleUrlChange);
+      window.removeEventListener('hashchange', handleUrlChange);
+    };
   }, []);
 
-  // Path navigation helper
+  // Path navigation helper (supports both pathname and hash for static hosts like Vercel)
   const navigateTo = (path: string) => {
-    window.history.pushState(null, '', path);
-    setIsAdminRoute(path.startsWith('/admin'));
+    if (path.startsWith('/admin')) {
+      window.history.pushState(null, '', '/admin');
+      window.location.hash = '/admin';
+      setIsAdminRoute(true);
+    } else {
+      window.history.pushState(null, '', '/');
+      window.location.hash = '';
+      setIsAdminRoute(false);
+    }
   };
 
   // Login handler
@@ -74,66 +103,121 @@ export default function App() {
     setIsAuthenticated(false);
   };
 
-  // Fetch all state from server
+  // Fetch all state from server & Firestore
   const fetchData = useCallback(async (isSilent = false) => {
     if (!isSilent) setLoading(true);
     setError(null);
 
     try {
       const [filesRes, logsRes, statsRes] = await Promise.all([
-        fetch('/api/files'),
-        fetch('/api/logs'),
-        fetch('/api/system-status')
+        fetch('/api/files').catch(() => null),
+        fetch('/api/logs').catch(() => null),
+        fetch('/api/system-status').catch(() => null)
       ]);
 
-      if (!filesRes.ok || !logsRes.ok) {
-        throw new Error('Failed to communicate with server');
+      let serverFiles: UploadedFile[] = [];
+      let serverLogs: UploadAuditLog[] = [];
+
+      if (filesRes && filesRes.ok) {
+        const filesData = await filesRes.json();
+        serverFiles = filesData.files || [];
       }
 
-      const filesData = await filesRes.json();
-      const logsData = await logsRes.json();
-      const statsData = statsRes.ok ? await statsRes.json() : null;
+      if (logsRes && logsRes.ok) {
+        const logsData = await logsRes.json();
+        serverLogs = logsData.logs || [];
+      }
 
-      // Check if new files arrived
+      if (statsRes && statsRes.ok) {
+        const statsData = await statsRes.json();
+        if (statsData?.stats) setStats(statsData.stats);
+      }
+
+      // Merge with state, deduplicating by ID
       setFiles(prev => {
-        if (prev.length > 0 && filesData.files && filesData.files.length > prev.length) {
-          const diff = filesData.files.length - prev.length;
-          setAutoSyncNotice(`Received ${diff} new file(s) from PC ingestion!`);
-          setTimeout(() => setAutoSyncNotice(null), 4000);
-        }
-        return filesData.files || [];
+        const combined = [...serverFiles];
+        prev.forEach(p => {
+          if (!combined.some(c => c.id === p.id)) {
+            combined.push(p);
+          }
+        });
+        return combined.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
       });
 
-      setLogs(logsData.logs || []);
-      if (statsData?.stats) {
-        setStats(statsData.stats);
-      }
+      setLogs(prev => {
+        const combined = [...serverLogs];
+        prev.forEach(p => {
+          if (!combined.some(c => c.id === p.id)) {
+            combined.push(p);
+          }
+        });
+        return combined.sort((a, b) => (b.timestampMs || 0) - (a.timestampMs || 0));
+      });
+
       setLastRefreshed(new Date());
     } catch (err: any) {
-      console.error('Data fetch error:', err);
-      setError(err.message || 'Server communication issue');
+      console.warn('API sync warning:', err);
     } finally {
       if (!isSilent) setLoading(false);
     }
   }, []);
 
-  // Poll for new files when in admin view
+  // Real-time Firebase Firestore subscriptions
   useEffect(() => {
+    // 1. Initial server fetch
     fetchData();
 
+    // 2. Real-time Firestore sync
+    const unsubscribeFiles = subscribeToFiles((firebaseFiles) => {
+      setFiles(prev => {
+        const map = new Map<string, UploadedFile>();
+        // Add existing files
+        prev.forEach(f => map.set(f.id, f));
+        // Add or update Firestore files
+        firebaseFiles.forEach(f => map.set(f.id, f));
+        const merged = Array.from(map.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+        if (prev.length > 0 && merged.length > prev.length) {
+          setAutoSyncNotice(`Received ${merged.length - prev.length} new file(s) from PC ingestion!`);
+          setTimeout(() => setAutoSyncNotice(null), 4000);
+        }
+        return merged;
+      });
+      setLoading(false);
+    });
+
+    const unsubscribeLogs = subscribeToLogs((firebaseLogs) => {
+      setLogs(prev => {
+        const map = new Map<string, UploadAuditLog>();
+        prev.forEach(l => map.set(l.id, l));
+        firebaseLogs.forEach(l => map.set(l.id, l));
+        return Array.from(map.values()).sort((a, b) => (b.timestampMs || 0) - (a.timestampMs || 0));
+      });
+    });
+
+    // 3. Periodic fallback poll
     const interval = setInterval(() => {
       fetchData(true);
-    }, 5000);
+    }, 6000);
 
-    return () => clearInterval(interval);
+    return () => {
+      unsubscribeFiles();
+      unsubscribeLogs();
+      clearInterval(interval);
+    };
   }, [fetchData]);
 
   // Handle single file deletion
-  const handleDeleteFile = async (id: string) => {
+  const handleDeleteFile = async (id: string, name: string) => {
+    const targetFile = files.find(f => f.id === id);
     try {
-      const res = await fetch(`/api/files/${id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete file');
-      await fetchData(true);
+      // 1. Delete on server disk
+      await fetch(`/api/files/${id}`, { method: 'DELETE' }).catch(() => {});
+      // 2. Delete on Firebase
+      if (targetFile) {
+        await deleteFileFromFirebase(targetFile);
+      }
+      setFiles(prev => prev.filter(f => f.id !== id));
     } catch (err: any) {
       alert(`Error deleting file: ${err.message}`);
     }
@@ -142,9 +226,9 @@ export default function App() {
   // Handle clear logs
   const handleClearLogs = async () => {
     try {
-      const res = await fetch('/api/logs', { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to clear logs');
-      await fetchData(true);
+      await fetch('/api/logs', { method: 'DELETE' }).catch(() => {});
+      await clearFirebaseLogs();
+      setLogs([]);
     } catch (err: any) {
       alert(`Error clearing logs: ${err.message}`);
     }
@@ -153,6 +237,7 @@ export default function App() {
   // Download all files as a ZIP archive
   const handleDownloadAll = () => {
     if (files.length === 0) return;
+    // If Express backend is active:
     window.location.href = '/api/files/download-all';
   };
 
@@ -161,7 +246,7 @@ export default function App() {
     return (
       <PublicHome
         onNavigateToAdmin={() => navigateTo('/admin')}
-        domainUrl={DOMAIN_URL}
+        domainUrl={currentHost}
       />
     );
   }
@@ -232,7 +317,7 @@ export default function App() {
           files={files}
           logs={logs}
           stats={stats}
-          currentHost={DOMAIN_URL}
+          currentHost={currentHost}
         />
 
         {/* Active View Switcher */}
@@ -263,7 +348,7 @@ export default function App() {
 
             {activeTab === 'scripts' && (
               <ScriptGuides
-                serverUrl={DOMAIN_URL}
+                serverUrl={currentHost}
                 onTestUploadSuccess={() => {
                   fetchData(true);
                   setActiveTab('vault');
@@ -289,7 +374,7 @@ export default function App() {
           <div className="flex items-center gap-2 font-mono text-[11px]">
             <span>DropVault Admin Vault</span>
             <span>·</span>
-            <span>Domain: {DOMAIN_URL}</span>
+            <span>Host: {currentHost}</span>
             <span>·</span>
             <button
               onClick={() => navigateTo('/')}

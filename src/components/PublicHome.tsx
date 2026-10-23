@@ -1,5 +1,6 @@
 import React, { useState, useRef } from 'react';
-import { UploadCloud, File, CheckCircle2, AlertCircle, Terminal, Lock, Copy, Check, ArrowRight } from 'lucide-react';
+import { UploadCloud, File, CheckCircle2, AlertCircle, Terminal, Lock, Copy, Check, ArrowRight, ShieldCheck } from 'lucide-react';
+import { uploadDirectToFirebase } from '../lib/firebaseStore';
 
 interface PublicHomeProps {
   onNavigateToAdmin: () => void;
@@ -52,47 +53,46 @@ export const PublicHome: React.FC<PublicHomeProps> = ({ onNavigateToAdmin, domai
     }
   };
 
-  const handleUpload = () => {
+  const handleUpload = async () => {
     if (!selectedFile) return;
 
     setUploading(true);
-    setProgress(15);
+    setProgress(20);
     setErrorMessage(null);
 
-    const formData = new FormData();
-    formData.append('file', selectedFile);
+    // Try server API upload first
+    try {
+      const formData = new FormData();
+      formData.append('file', selectedFile);
 
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/upload');
+      const res = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
+      });
 
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        setProgress(Math.round((e.loaded / e.total) * 100));
+      if (res.ok) {
+        const json = await res.json();
+        setUploadSuccess(json.message || 'File uploaded successfully!');
+        setSelectedFile(null);
+        setUploading(false);
+        return;
       }
-    };
+    } catch {
+      // Continue to Firebase direct fallback
+    }
 
-    xhr.onload = () => {
+    // Direct Firebase storage & Firestore fallback (works seamlessly on Vercel)
+    try {
+      setProgress(65);
+      await uploadDirectToFirebase(selectedFile);
+      setProgress(100);
+      setUploadSuccess(`Successfully uploaded "${selectedFile.name}" to Firebase Cloud Vault!`);
+      setSelectedFile(null);
+    } catch (fbErr: any) {
+      setErrorMessage(`Upload failed: ${fbErr?.message || 'Transmission error'}`);
+    } finally {
       setUploading(false);
-      if (xhr.status === 200) {
-        try {
-          const res = JSON.parse(xhr.responseText);
-          setUploadSuccess(res.message || 'File uploaded successfully!');
-          setSelectedFile(null);
-        } catch {
-          setUploadSuccess('File uploaded successfully!');
-          setSelectedFile(null);
-        }
-      } else {
-        setErrorMessage(`Upload failed (Status ${xhr.status})`);
-      }
-    };
-
-    xhr.onerror = () => {
-      setUploading(false);
-      setErrorMessage('Network error occurred during upload');
-    };
-
-    xhr.send(formData);
+    }
   };
 
   const formatSize = (bytes: number) => {

@@ -1,5 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { UploadCloud, Folder, File, CheckCircle2, AlertCircle, X, ArrowRight } from 'lucide-react';
+import { uploadDirectToFirebase } from '../lib/firebaseStore';
 
 interface DirectUploaderProps {
   onUploadSuccess: () => void;
@@ -70,69 +71,63 @@ export const DirectUploader: React.FC<DirectUploaderProps> = ({ onUploadSuccess,
     if (selectedFiles.length === 0) return;
 
     setUploading(true);
-    setUploadProgress(10);
+    setUploadProgress(15);
     setStatusMessage(null);
 
-    const formData = new FormData();
-    selectedFiles.forEach((file) => {
-      formData.append('files', file);
-      // Optional relative path for folder preservation
-      if ((file as any).webkitRelativePath) {
-        formData.append(`path_files`, (file as any).webkitRelativePath);
-      }
-    });
-
+    // Try standard server upload first
+    let serverUploadSuccess = false;
     try {
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', '/api/upload');
-
-      xhr.upload.onprogress = (event) => {
-        if (event.lengthComputable) {
-          const percent = Math.round((event.loaded / event.total) * 100);
-          setUploadProgress(percent);
+      const formData = new FormData();
+      selectedFiles.forEach((file) => {
+        formData.append('files', file);
+        if ((file as any).webkitRelativePath) {
+          formData.append(`path_files`, (file as any).webkitRelativePath);
         }
-      };
+      });
 
-      xhr.onload = () => {
-        if (xhr.status === 200) {
-          const res = JSON.parse(xhr.responseText);
-          setStatusMessage({
-            type: 'success',
-            text: `Successfully uploaded ${selectedFiles.length} file(s) (${formatSize(totalBytes)}) to the server vault!`
-          });
-          setSelectedFiles([]);
-          onUploadSuccess();
-        } else {
-          try {
-            const err = JSON.parse(xhr.responseText);
-            setStatusMessage({
-              type: 'error',
-              text: err.message || err.error || 'Upload was rejected by server'
-            });
-          } catch {
-            setStatusMessage({
-              type: 'error',
-              text: `Upload failed with status HTTP ${xhr.status}`
-            });
-          }
-        }
-        setUploading(false);
-      };
+      const res = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
+      });
 
-      xhr.onerror = () => {
+      if (res.ok) {
+        serverUploadSuccess = true;
         setStatusMessage({
-          type: 'error',
-          text: 'Network error occurred during file transmission'
+          type: 'success',
+          text: `Successfully uploaded ${selectedFiles.length} file(s) (${formatSize(totalBytes)}) to the server vault!`
         });
+        setSelectedFiles([]);
+        onUploadSuccess();
         setUploading(false);
-      };
+        return;
+      }
+    } catch {
+      // Continue to Firebase fallback
+    }
 
-      xhr.send(formData);
-    } catch (err: any) {
+    // Direct Firebase Storage fallback (works seamlessly on Vercel without server backend)
+    try {
+      setUploadProgress(40);
+      let count = 0;
+      for (const file of selectedFiles) {
+        await uploadDirectToFirebase(file);
+        count++;
+        setUploadProgress(Math.round(40 + (count / selectedFiles.length) * 55));
+      }
+
+      setUploadProgress(100);
+      setStatusMessage({
+        type: 'success',
+        text: `Successfully saved ${selectedFiles.length} file(s) (${formatSize(totalBytes)}) to Firebase Cloud Vault!`
+      });
+      setSelectedFiles([]);
+      onUploadSuccess();
+    } catch (fbErr: any) {
       setStatusMessage({
         type: 'error',
-        text: err.message || 'Transmission failed'
+        text: `Upload failed: ${fbErr?.message || 'Transmission error'}`
       });
+    } finally {
       setUploading(false);
     }
   };
